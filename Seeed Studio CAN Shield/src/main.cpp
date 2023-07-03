@@ -1,132 +1,110 @@
-// demo: CAN-BUS Shield, receive data and save to sd card, can.csv
-// when in interrupt mode, the data coming can't be too fast, must >20ms, or
-// else you can use check mode NOTE: Only CAN Bus Shield V2.0 has SD slot, for
-// other versions, you need an SD card Shield as well loovee, Jun 12, 2017
-
-#include <SD.h>
-#include <SPI.h>
+#include "common/bb_can.h"
+#include <Arduino.h>
+#include <can.h>
 #include <stdint.h>
-File myFile;
 
-const int SPI_CS_PIN = 9;
-const int CAN_INT_PIN = 2;
+#define CAN_CS (9) // Seeed Studio CAN Shield
+//#define CAN_CS (10) // BB CAN Shield
+#define HB_LOOP (1000);
 
-#include "mcp2515_can.h"
-mcp2515_can CAN(SPI_CS_PIN); // Set CS pin
+void CAN_init();
+void publishCAN_heartbeat(int device_id);
 
-unsigned char flagRecv = 0;
-unsigned char len = 0;
-unsigned char buf[8];
-char str[20];
+MCP_CAN CAN(CAN_CS);
 
-void MCP2515_ISR();
+static uint32_t hb_loop = 0;
+
+uint32_t id = 0;
+uint8_t len = 0;
+uint8_t buf[8];
 
 void setup() {
-  SERIAL_PORT_MONITOR.begin(115200);
-  attachInterrupt(digitalPinToInterrupt(CAN_INT_PIN), MCP2515_ISR,
-                  FALLING);                  // start interrupt
-  while (CAN_OK != CAN.begin(CAN_500KBPS)) { // init can bus : baudrate = 500k
-    SERIAL_PORT_MONITOR.println("CAN init fail, retry...");
-    delay(100);
-  }
-  SERIAL_PORT_MONITOR.println("CAN init ok!");
-
-  if (!SD.begin(4)) {
-    SERIAL_PORT_MONITOR.println("SD init fail!");
-    while (1)
-      ;
-  }
-  SERIAL_PORT_MONITOR.println("SD init OK.");
+  pinMode(CAN_CS, OUTPUT);
+  digitalWrite(CAN_CS, HIGH);
+  Serial.begin(115200);
+  Serial.println("Initialisation");
+  CAN_init();
 }
-
-void MCP2515_ISR() { flagRecv = 1; }
 
 void loop() {
-  if (flagRecv) {
-    // check if get data
 
-    flagRecv = 0; // clear flag
-    unsigned long id = 0;
-    uint16_t batt_current = 0;
-    uint16_t batt_voltage = 0;
-    uint16_t batt_capacity = 0;
-    uint16_t batt_soc = 0;
-    uint16_t batt_press = 0;
-    uint16_t batt_temp = 0;
+  uint16_t current = 0;
+  uint16_t voltage = 0;
+  uint16_t soc = 0;
+  uint16_t capacity = 0;
 
-    myFile = SD.open("can.csv", FILE_WRITE);
+  uint16_t pressure = 0;
+  uint16_t temperature = 0;
+  // if (millis() - hb_loop > 1000) {
+  //   publishCAN_heartbeat(bb::heartbeat_id::PMB_1);
+  //   hb_loop = millis();
+  // }
+  if (CAN_MSGAVAIL == CAN.checkReceive()) {
+    CAN.readMsgBufID(&id, &len, buf);
+    Serial.print("Can id: ");
+    Serial.println(CAN.getCanId());
 
-    while (CAN_MSGAVAIL == CAN.checkReceive()) {
-      // read data,  len: data length, buf: data buf
-      CAN.readMsgBufID(&id, &len, buf);
+    switch (CAN.getCanId()) {
+    case bb::can_id::HEARTBEAT:
+      uint8_t device = CAN.parseCANFrame(buf, 0, 1);
+      Serial.print("Device Heartbeat: ");
+      Serial.println(device);
+      break;
+    case bb::can_id::BATT_1_STAT:
+    case bb::can_id::BATT_2_STAT:
+      current = CAN.parseCANFrame(buf, 0, 2);
+      voltage = CAN.parseCANFrame(buf, 2, 2);
+      soc = CAN.parseCANFrame(buf, 4, 2);
+      capacity = CAN.parseCANFrame(buf, 6, 2);
+      Serial.print("Current: ");
+      Serial.println(current);
+      Serial.print("Voltage: ");
+      Serial.println(voltage);
+      Serial.print("SOC: ");
+      Serial.println(soc);
+      Serial.print("Capacity: ");
+      Serial.println(capacity);
+      break;
 
-      switch (id) {
-      case 23: // Battery 1 Statistics
-      case 25: // Battery 2 Statistics
-        batt_current = (uint16_t)buf[0] | (uint16_t)buf[1] << 8;
-        batt_voltage = (uint16_t)buf[2] | (uint16_t)buf[3] << 8;
-        batt_capacity = (uint16_t)buf[4] | (uint16_t)buf[5] << 8;
-        batt_soc = (uint16_t)buf[6] | (uint16_t)buf[7] << 8;
-        break;
-      case 24: // Hull 1 Statistics
-      case 26: // Hull 2 Statistics
-        batt_temp = (uint16_t)buf[0] | (uint16_t)buf[1] << 8;
-        batt_press = (uint16_t)buf[2] | (uint16_t)buf[3] << 8;
-        break;
-      default:
-        break;
+    case bb::can_id::PMB_1_STAT:
+    case bb::can_id::PMB_2_STAT:
+      pressure = CAN.parseCANFrame(buf, 2, 2);
+      temperature = CAN.parseCANFrame(buf, 0, 2);
+      Serial.print("Temperature: ");
+      Serial.println(temperature);
+      Serial.print("Pressure: ");
+      Serial.println(pressure);
+      break;
+
+    default:
+      for (int i = 0; i < len; i++) {
+        Serial.print(buf[i]);
+        Serial.print(",");
       }
-
-      SERIAL_PORT_MONITOR.println(id);
-      myFile.print(id);
-      myFile.print(",");
-
-      if (id == 23 || id == 25) {
-        SERIAL_PORT_MONITOR.print("Voltage: ");
-        SERIAL_PORT_MONITOR.println(batt_voltage);
-        myFile.print(batt_voltage);
-        myFile.print(",");
-
-        SERIAL_PORT_MONITOR.print("Current: ");
-        SERIAL_PORT_MONITOR.println(batt_current);
-        myFile.print(batt_current);
-        myFile.print(",");
-
-        SERIAL_PORT_MONITOR.print("Capacity: ");
-        SERIAL_PORT_MONITOR.println(batt_capacity);
-        myFile.print(batt_capacity);
-        myFile.print(",");
-
-        SERIAL_PORT_MONITOR.print("SOC: ");
-        SERIAL_PORT_MONITOR.println(batt_soc);
-        myFile.print(batt_soc);
-        myFile.print(",");
-      } else if (id == 24 || id == 26) {
-        SERIAL_PORT_MONITOR.print("Temperature: ");
-        SERIAL_PORT_MONITOR.println(batt_temp);
-        myFile.print(batt_temp);
-        myFile.print(",");
-
-        SERIAL_PORT_MONITOR.print("Pressure: ");
-        SERIAL_PORT_MONITOR.println(batt_press);
-        myFile.print(batt_press);
-        myFile.print(",");
-      } else {
-        for (int i = 0; i < len; i++) {
-          SERIAL_PORT_MONITOR.print(buf[i]);
-          SERIAL_PORT_MONITOR.print(",");
-
-          myFile.print(buf[i]);
-          myFile.print(",");
-        }
-        SERIAL_PORT_MONITOR.println();
-      }
-
-      myFile.println();
+      Serial.println();
+      break;
     }
-
-    myFile.close();
+    CAN.clearMsg();
   }
 }
 
-// END FILE
+void CAN_init() {
+START_INIT:
+  if (CAN_OK == CAN.begin(CAN_500KBPS)) // init can bus : baudrate = 2220Kbps
+  {
+    Serial.println("CAN BUS: OK");
+  } else {
+    Serial.println("CAN BUS: FAILED");
+    Serial.println("CAN BUS: Reinitializing");
+    delay(1000);
+    goto START_INIT;
+  }
+  Serial.println("INITIATING TRANSMISSION...");
+}
+
+void publishCAN_heartbeat(int device_id) {
+  id = bb::can_id::HEARTBEAT;
+  len = 1;
+  buf[0] = device_id;
+  CAN.sendMsgBuf(bb::can_id::HEARTBEAT, 0, 1, buf);
+}
